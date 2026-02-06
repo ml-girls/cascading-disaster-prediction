@@ -1,0 +1,21 @@
+Primary,Secondary,0
+Thunderstorm Wind,[],62993
+Hail,[],24877
+Drought,[],19015
+High Wind,[],16896
+Winter Weather,[],14477
+Flash Flood,[],13996
+Winter Storm,[],10980
+Marine Thunderstorm Wind,[],10652
+Flood,[],9414
+Heavy Snow,[],8818
+Excessive Heat,[],7929
+Heat,[],7224
+Hail,['Thunderstorm Wind'],6284
+Thunderstorm Wind,['Hail'],5189
+Tornado,[],4758
+Strong Wind,[],4220
+Heavy Rain,[],4134
+Extreme Cold/Wind Chill,[],3456
+Dense Fog,[],2634
+Frost/Freeze,[],2415
