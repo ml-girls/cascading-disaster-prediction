@@ -1,0 +1,100 @@
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import pickle
+from typing import Tuple, Optional
+from features import engineer_base_features, get_feature_columns
+from aggregate_features import AggregateFeatureTransformer
+
+DATA_DIR = Path(__file__).parent.parent / "labeled_data"
+OUTPUT_DIR = Path(__file__).parent / "prepared_data"
+RANDOM_STATE = 42
+TEST_SIZE = 0.2
+SPLIT_TYPE = 'random' # 'random' or 'chronological'
+
+def load_data() -> Tuple[pd.DataFrame, Optional[pd.DataFrame], pd.DataFrame]:
+    events_path = DATA_DIR / "events_labeled.csv"
+    cascade_pairs_path = DATA_DIR / "cascade_pairs.csv"
+    labels_path = DATA_DIR / "labels_binary.csv"
+    
+    if not events_path.exists(): raise FileNotFoundError(f"Events not found: {events_path}")
+    events_df = pd.read_csv(events_path, low_memory=False)
+    
+    for col in ['BEGIN_DATETIME', 'END_DATETIME']:
+        if col in events_df.columns:
+            events_df[col] = pd.to_datetime(events_df[col], errors='coerce')
+    
+    cascade_pairs = pd.read_csv(cascade_pairs_path) if cascade_pairs_path.exists() else None
+    if cascade_pairs is not None and 'primary_begin_time' in cascade_pairs.columns:
+        cascade_pairs['primary_begin_time'] = pd.to_datetime(cascade_pairs['primary_begin_time'], errors='coerce')
+        
+    if not labels_path.exists(): raise FileNotFoundError(f"Labels not found: {labels_path}")
+    labels_binary = pd.read_csv(labels_path)
+    
+    if len(events_df) != len(labels_binary):
+        raise ValueError(f"Alignment error: Events ({len(events_df)}) != Labels ({len(labels_binary)})")
+    
+    return events_df, cascade_pairs, labels_binary
+
+def split_data(events_df, labels_binary, split_type='chronological', test_size=0.2):
+    if split_type == 'chronological':
+        sort_idx = events_df['BEGIN_DATETIME'].argsort()
+        events_df = events_df.iloc[sort_idx].reset_index(drop=True)
+        labels_binary = labels_binary.iloc[sort_idx].reset_index(drop=True)
+        split_idx = int(len(events_df) * (1 - test_size))
+        return events_df.iloc[:split_idx], events_df.iloc[split_idx:], labels_binary.iloc[:split_idx], labels_binary.iloc[split_idx:]
+    elif split_type == 'random':
+        from sklearn.model_selection import train_test_split
+        any_cascade = (labels_binary.values.sum(axis=1) > 0).astype(int)
+        train_idx, test_idx = train_test_split(np.arange(len(events_df)), test_size=test_size, random_state=RANDOM_STATE, stratify=any_cascade)
+        return events_df.iloc[train_idx], events_df.iloc[test_idx], labels_binary.iloc[train_idx], labels_binary.iloc[test_idx]
+    raise ValueError(f"Unknown split_type: {split_type}")
+
+def engineer_features(train_events, test_events, cascade_pairs, split_type, include_historical=True):
+    if split_type == 'random':
+        include_historical = False
+    
+    train_featured = engineer_base_features(train_events, include_historical=include_historical)
+    test_featured = engineer_base_features(test_events, include_historical=include_historical)
+    
+    if split_type == 'chronological' and cascade_pairs is not None:
+        agg_transformer = AggregateFeatureTransformer()
+        train_featured = agg_transformer.fit_transform(train_featured, cascade_pairs)
+        test_featured = agg_transformer.transform(test_featured)
+        
+    feature_cols = get_feature_columns(train_featured)
+    return train_featured, test_featured, feature_cols
+
+def prepare_data(include_historical=True, split_type='chronological'):
+    events_df, cascade_pairs, labels_binary = load_data()
+    
+    if 'BEGIN_DATETIME' in events_df.columns:
+        mask = (events_df['BEGIN_DATETIME'].dt.year >= 2010) & (events_df['BEGIN_DATETIME'].dt.year <= 2025)
+        events_df = events_df[mask].reset_index(drop=True)
+        labels_binary = labels_binary[mask].reset_index(drop=True)
+    
+    train_events, test_events, train_labels, test_labels = split_data(events_df, labels_binary, split_type=split_type, test_size=TEST_SIZE)
+    
+    cascade_pairs_train = None
+    if cascade_pairs is not None and split_type == 'chronological':
+        cutoff_time = train_events['BEGIN_DATETIME'].max()
+        cascade_pairs_train = cascade_pairs[cascade_pairs['primary_begin_time'] <= cutoff_time].copy() if 'primary_begin_time' in cascade_pairs.columns else \
+                             cascade_pairs[cascade_pairs['primary_event_id'].isin(set(train_events['EVENT_ID']))].copy()
+    
+    train_featured, test_featured, feature_cols = engineer_features(train_events, test_events, cascade_pairs_train, split_type, include_historical)
+    
+    X_train, X_test = train_featured[feature_cols].fillna(0), test_featured[feature_cols].fillna(0)
+    y_train, y_test = train_labels.values, test_labels.values
+    target_names = train_labels.columns.tolist()
+    
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    np.save(OUTPUT_DIR / "X_train.npy", X_train.values); np.save(OUTPUT_DIR / "X_test.npy", X_test.values)
+    np.save(OUTPUT_DIR / "y_train.npy", y_train); np.save(OUTPUT_DIR / "y_test.npy", y_test)
+    
+    with open(OUTPUT_DIR / "metadata.pkl", "wb") as f:
+        pickle.dump({'feature_names': feature_cols, 'target_names': target_names, 'split_type': split_type}, f)
+        
+    return X_train, X_test, y_train, y_test, feature_cols, target_names
+
+if __name__ == "__main__":
+    prepare_data(include_historical=True, split_type='chronological')
