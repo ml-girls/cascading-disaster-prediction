@@ -16,3 +16,4 @@ dependencies:
     - nbformat
     - notebook
     - tqdm
+    - pydrive2

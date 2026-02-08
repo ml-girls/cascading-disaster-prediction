@@ -273,3 +273,28 @@ def load_storm_events_with_fatalities(
     print(f"Events with fatalities: {(df['FATALITY_COUNT'] > 0).sum():,}")
     
     return df
+
+
+def read_all_csvs_from_gdrive(drive, folder_id, folder_name):
+    """
+    Fetches all CSV files from a GDrive folder and combines them.
+    """
+    query = f"'{folder_id}' in parents and trashed = false"
+    file_list = drive.ListFile({'q': query}).GetList()
+    
+    if not file_list:
+        print(f"No files found in {folder_name}")
+        return pd.DataFrame()
+
+    li = []
+    for file in file_list:
+        if file['title'].endswith('.csv') or file['title'].endswith('.csv.gz'):
+            if file['title'].endswith('.gz'):
+                content = file.GetContentBinary()
+                df = pd.read_csv(io.BytesIO(content), compression='gzip', low_memory=False)
+            else:
+                content = file.GetContentString()
+                df = pd.read_csv(io.StringIO(content), low_memory=False)
+            li.append(df)
+
+    return pd.concat(li, axis=0, ignore_index=True) if li else pd.DataFrame()
