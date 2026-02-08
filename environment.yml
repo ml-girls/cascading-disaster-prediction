@@ -1,0 +1,18 @@
+name: cascading-disaster
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - pandas
+  - matplotlib
+  - seaborn
+  - networkx
+  - scikit-learn
+  - jupyterlab
+  - ipykernel
+  - pip
+  - pip:
+    - nbformat
+    - notebook
+    - tqdm
