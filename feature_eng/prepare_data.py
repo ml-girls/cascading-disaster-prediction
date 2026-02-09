@@ -6,7 +6,7 @@ from typing import Tuple, Optional
 from features import engineer_base_features, get_feature_columns
 from aggregate_features import AggregateFeatureTransformer
 
-SPLIT_TYPE = 'random'
+SPLIT_TYPE = 'chronological'
 DATA_DIR = Path(__file__).parent.parent.parent / "labeled_data"
 OUTPUT_DIR = Path(__file__).parent.parent / f"{SPLIT_TYPE}_prepared_data"
 RANDOM_STATE = 42
@@ -16,37 +16,81 @@ def load_data(year_range=(2010, 2025)):
     """Load and filter to cascade-related events only."""
 
     events_path = DATA_DIR / "events_labeled.csv"
-    cascade_pairs_path = DATA_DIR / "cascade_pairs.csv"
     labels_path = DATA_DIR / "labels_binary.csv"
 
     events_df = pd.read_csv(events_path, low_memory=False)
+    labels_binary = pd.read_csv(labels_path)
     
-    # Parse datetimes before filtering
+    if 'EVENT_ID' in labels_binary.columns:
+        label_cols = [c for c in labels_binary.columns if c != 'EVENT_ID']
+        
+        combined = events_df.merge(
+            labels_binary,
+            on='EVENT_ID',
+            how='inner',
+            validate='one_to_one'  # Ensures 1:1 relationship
+        )
+        
+        # Split back into events and labels
+        labels_binary = combined[label_cols]
+        events_df = combined.drop(columns=label_cols)
+    
+    # Parse dates
     for col in ['BEGIN_DATETIME', 'END_DATETIME']:
         if col in events_df.columns:
             events_df[col] = pd.to_datetime(events_df[col], errors='coerce')
     
-    # Load labels to ensure alignment during filtering
-    labels_binary = pd.read_csv(labels_path)
-    
-    # Filter both by year range to maintain alignment
     year_mask = (events_df['BEGIN_DATETIME'].dt.year >= year_range[0]) & \
                 (events_df['BEGIN_DATETIME'].dt.year <= year_range[1])
     
     events_df = events_df[year_mask].reset_index(drop=True)
     labels_binary = labels_binary[year_mask].reset_index(drop=True)
     
-    cascade_pairs = pd.read_csv(cascade_pairs_path) if cascade_pairs_path.exists() else None
-    if cascade_pairs is not None and 'primary_begin_time' in cascade_pairs.columns:
-        cascade_pairs['primary_begin_time'] = pd.to_datetime(cascade_pairs['primary_begin_time'], errors='coerce')
-    
-    print(f"Loaded {len(events_df):,} total events")
-    
+    print(f"After year filter ({year_range[0]}-{year_range[1]}): {len(events_df):,} events")
     has_any_cascade = labels_binary.sum(axis=1) > 0
     
-    print(f"Events with cascades: {has_any_cascade.sum():,}")
-    print(f"Events without cascades: {(~has_any_cascade).sum():,}")
-    print(f"Events with cascades percentage: {has_any_cascade.mean():.2f}")
+    print(f"\nCascade filtering:")
+    print(f"  Events with cascades: {has_any_cascade.sum():,}")
+    print(f"  Events without cascades: {(~has_any_cascade).sum():,}")
+    
+    events_df = events_df[has_any_cascade].reset_index(drop=True)
+    labels_binary = labels_binary[has_any_cascade].reset_index(drop=True)
+    
+    n_events = len(events_df)
+    n_positive_labels = labels_binary.values.sum()
+    n_total_labels = labels_binary.size
+    
+    # Per-event statistics
+    labels_per_event = labels_binary.sum(axis=1)
+    avg_labels_per_event = labels_per_event.mean()
+    max_labels_per_event = labels_per_event.max()
+    
+    # Per-label statistics
+    events_per_label = labels_binary.sum(axis=0)
+    avg_events_per_label = events_per_label.mean()
+    
+    print(f"  Total events: {n_events:,}")
+    print(f"  Total positive labels: {n_positive_labels:,}")
+    print(f"  Label sparsity: {n_positive_labels/n_total_labels*100:.2f}%")
+    
+    print(f"  Avg cascades per event: {avg_labels_per_event:.2f}")
+    print(f"  Max cascades per event: {max_labels_per_event}")
+    print(f"  Avg events per cascade type: {avg_events_per_label:.1f}")
+    
+    cascade_dist = labels_per_event.value_counts().sort_index()
+    for n_cascades, count in cascade_dist.items():
+        pct = count / n_events * 100
+        print(f"  {n_cascades} cascades: {count:,} events ({pct:.1f}%)")
+
+    cascade_pairs_path = DATA_DIR / "cascade_pairs.csv"
+    
+    cascade_pairs = None
+    if cascade_pairs_path.exists():
+        cascade_pairs = pd.read_csv(cascade_pairs_path)
+        if 'primary_begin_time' in cascade_pairs.columns:
+            cascade_pairs['primary_begin_time'] = pd.to_datetime(
+                cascade_pairs['primary_begin_time'], errors='coerce'
+            )
     
     return events_df, cascade_pairs, labels_binary
 
