@@ -3,16 +3,15 @@ import numpy as np
 from pathlib import Path
 import pickle
 from typing import Tuple, Optional
+import argparse
 from features import engineer_base_features, get_feature_columns
 from aggregate_features import AggregateFeatureTransformer
 
-SPLIT_TYPE = 'chronological'
 DATA_DIR = Path(__file__).parent.parent.parent / "labeled_data"
-OUTPUT_DIR = Path(__file__).parent.parent / f"{SPLIT_TYPE}_prepared_data"
 RANDOM_STATE = 42
 TEST_SIZE = 0.2
 
-def load_data(year_range=(2010, 2025)):
+def load_data(year_range=(2010, 2025), filter_cascades=True):
     """Load and filter to cascade-related events only."""
 
     events_path = DATA_DIR / "events_labeled.csv"
@@ -53,8 +52,10 @@ def load_data(year_range=(2010, 2025)):
     print(f"  Events with cascades: {has_any_cascade.sum():,}")
     print(f"  Events without cascades: {(~has_any_cascade).sum():,}")
     
-    events_df = events_df[has_any_cascade].reset_index(drop=True)
-    labels_binary = labels_binary[has_any_cascade].reset_index(drop=True)
+    if filter_cascades:
+        print("Filtering events without cascades...")
+        events_df = events_df[has_any_cascade].reset_index(drop=True)
+        labels_binary = labels_binary[has_any_cascade].reset_index(drop=True)
     
     n_events = len(events_df)
     n_positive_labels = labels_binary.values.sum()
@@ -123,8 +124,8 @@ def engineer_features(train_events, test_events, cascade_pairs, split_type, incl
     feature_cols = get_feature_columns(train_featured)
     return train_featured, test_featured, feature_cols
 
-def prepare_data(include_historical=True, split_type='chronological'):
-    events_df, cascade_pairs, labels_binary = load_data(year_range=(2010, 2025))
+def prepare_data(include_historical=True, split_type='chronological', output_dir=None, filter_cascades=True):
+    events_df, cascade_pairs, labels_binary = load_data(year_range=(2010, 2025), filter_cascades=filter_cascades)
 
     train_events, test_events, train_labels, test_labels = split_data(events_df, labels_binary, split_type=split_type, test_size=TEST_SIZE)
     
@@ -163,19 +164,31 @@ def prepare_data(include_historical=True, split_type='chronological'):
         target_names = [t for t, keep in zip(target_names, label_mask) if keep]
         print(f"  Kept {len(target_names)} labels")
     
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    np.save(OUTPUT_DIR / "X_train.npy", X_train.values); np.save(OUTPUT_DIR / "X_test.npy", X_test.values)
-    np.save(OUTPUT_DIR / "y_train.npy", y_train); np.save(OUTPUT_DIR / "y_test.npy", y_test)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    np.save(output_dir / "X_train.npy", X_train.values); np.save(output_dir / "X_test.npy", X_test.values)
+    np.save(output_dir / "y_train.npy", y_train); np.save(output_dir / "y_test.npy", y_test)
     
-    with open(OUTPUT_DIR / "metadata.pkl", "wb") as f:
+    with open(output_dir / "metadata.pkl", "wb") as f:
         pickle.dump({'feature_names': feature_cols, 'target_names': target_names, 'split_type': split_type}, f)
         
     return X_train, X_test, y_train, y_test, feature_cols, target_names
 
 if __name__ == "__main__":
-    if SPLIT_TYPE == 'random':
-        prepare_data(include_historical=False, split_type=SPLIT_TYPE)
-    elif SPLIT_TYPE == 'chronological':
-        prepare_data(include_historical=True, split_type=SPLIT_TYPE)
+    parser = argparse.ArgumentParser(description='Prepare data for cascade detection')
+    parser.add_argument('--split_type', type=str, default='chronological', choices=['random', 'chronological'], help='Split type')
+    parser.add_argument('--filter_cascades', type=bool, help='Filter cascades')
+    args = parser.parse_args()
+
+    if args.filter_cascades:
+        output_dir = OUTPUT_DIR = Path(__file__).parent.parent / f"{args.split_type}_filtered_data"
     else:
-        raise ValueError(f"Unknown split_type: {SPLIT_TYPE}")
+        output_dir = OUTPUT_DIR = Path(__file__).parent.parent / f"{args.split_type}_data"
+
+    print(f"Output directory: {output_dir}")
+    
+    if args.split_type == 'random':
+        prepare_data(include_historical=False, split_type=args.split_type, output_dir=output_dir, filter_cascades=args.filter_cascades)
+    elif args.split_type == 'chronological':
+        prepare_data(include_historical=True, split_type=args.split_type, output_dir=output_dir, filter_cascades=args.filter_cascades)
+    else:
+        raise ValueError(f"Unknown split_type: {args.split_type}")

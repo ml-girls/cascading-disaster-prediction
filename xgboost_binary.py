@@ -6,6 +6,7 @@ Target: 1 if event triggers >= 1 cascade, 0 otherwise
 """
 
 import numpy as np
+import argparse
 import pandas as pd
 import pickle
 from pathlib import Path
@@ -27,7 +28,6 @@ class Config:
     """Configuration for binary cascade classifier."""
     
     # Data paths
-    DATA_DIR = Path('random_prepared_data')
     OUTPUT_DIR = Path('models/xgboost_binary')
     
     # XGBoost parameters
@@ -269,14 +269,14 @@ def save_model(model, results, feature_names, output_dir):
         f.write(f"  False Negatives: {results['false_negatives']:,}\n")
         f.write(f"  True Positives:  {results['true_positives']:,}\n")
 
-def main():
+def main(data_dir):
     """Run binary cascade detection pipeline."""
     
     config = Config()
     
     # Load data
     X_train, X_test, y_train, y_test, feature_names, target_names = \
-        load_data(config.DATA_DIR)
+        load_data(Path(data_dir))
     
     # Train
     model = train_binary_classifier(X_train, y_train, config)
@@ -302,4 +302,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Binary Cascade Detection')
+    parser.add_argument('--data_dir', type=str, help='Path to prepared data directory')
+    args = parser.parse_args()
+    main(args.data_dir)
