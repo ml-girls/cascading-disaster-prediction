@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Optional, List, Union
 from datetime import datetime
 import glob
+import io
+import os
 
 
 def parse_noaa_datetime(date_str: str) -> Optional[datetime]:
@@ -275,26 +277,70 @@ def load_storm_events_with_fatalities(
     return df
 
 
-def read_all_csvs_from_gdrive(drive, folder_id, folder_name):
-    """
-    Fetches all CSV files from a GDrive folder and combines them.
-    """
+def read_csv_from_gdrive(drive, folder_id, folder_name):
     query = f"'{folder_id}' in parents and trashed = false"
     file_list = drive.ListFile({'q': query}).GetList()
     
-    if not file_list:
-        print(f"No files found in {folder_name}")
-        return pd.DataFrame()
-
     li = []
     for file in file_list:
         if file['title'].endswith('.csv') or file['title'].endswith('.csv.gz'):
-            if file['title'].endswith('.gz'):
-                content = file.GetContentBinary()
-                df = pd.read_csv(io.BytesIO(content), compression='gzip', low_memory=False)
-            else:
-                content = file.GetContentString()
-                df = pd.read_csv(io.StringIO(content), low_memory=False)
-            li.append(df)
+            print(f"Fetching {file['title']} from {folder_name}...")
+            
+            # Create a temporary filename
+            temp_file = "temp_data_download.tmp"
+            # Download to the actual disk temporarily
+            file.GetContentFile(temp_file)
+            
+            try:
+                if file['title'].endswith('.gz'):
+                    df = pd.read_csv(temp_file, compression='gzip', low_memory=False)
+                else:
+                    df = pd.read_csv(temp_file, low_memory=False)
+                
+                if not df.empty:
+                    li.append(df)
+            except Exception as e:
+                print(f"Error parsing {file['title']}: {e}")
+            finally:
+                # Always remove the temporary file from your laptop
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
 
     return pd.concat(li, axis=0, ignore_index=True) if li else pd.DataFrame()
+
+
+def join_storm_data(details, fatalities, locations):
+    """
+    Joins storm details with aggregated fatality and location data.
+    """
+    if fatalities.empty:
+        print("Fatalities DataFrame is empty. Returning details only.")
+        joined_df = details
+    else:
+        # 1. Aggregate Fatalities:
+        # Since one Event ID can have multiple deaths, we count them first
+        # to avoid duplicating rows in the 'details' dataframe.
+        fatality_counts = fatalities.groupby('EVENT_ID').agg(
+            FATALITY_COUNT=('FATALITY_ID', 'count'),
+            FATALITY_TYPES=('FATALITY_TYPE', lambda x: ', '.join(x.unique()))
+        ).reset_index()
+
+        # 2. Perform the Left Join with fatalities:
+        # We use 'left' to keep all storm events even if they had 0 fatalities.
+        joined_df = pd.merge(details, fatality_counts, on='EVENT_ID', how='left')
+
+        # 3. Fill NaNs for fatality count:
+        # Events with no fatalities will have NaN; we turn those into 0.
+        joined_df['FATALITY_COUNT'] = joined_df['FATALITY_COUNT'].fillna(0).astype(int)
+
+    if not locations.empty:
+        # 4. Perform a Left Join with locations:
+        # We use 'left' to keep all events and add location details if available.
+        # Only keep necessary columns from locations_df to avoid redundancy/duplicates if any
+        location_cols_to_keep = ['EVENT_ID', 'LATITUDE', 'LONGITUDE', 'LAT2', 'LON2'] # Example columns, adjust as needed
+        locations_slim = locations[locations['EVENT_ID'].isin(joined_df['EVENT_ID'])]
+        locations_slim = locations_slim.drop_duplicates(subset=['EVENT_ID'])
+
+        joined_df = pd.merge(joined_df, locations_slim[location_cols_to_keep], on='EVENT_ID', how='left')
+
+    return joined_df
