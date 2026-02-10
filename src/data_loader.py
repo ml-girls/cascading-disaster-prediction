@@ -208,6 +208,93 @@ def load_fatalities(
     return pd.concat(dfs, ignore_index=True)
 
 
+def load_locations(
+    data_dir: Union[str, Path],
+    years: Optional[List[int]] = None
+) -> pd.DataFrame:
+    """
+    Load NOAA Storm Events locations data.
+    
+    Args:
+        data_dir: Directory containing the location/ subdirectory
+        years: List of years to load. If None, loads all.
+        
+    Returns:
+        DataFrame with location records
+    """
+    data_path = Path(data_dir)
+    locations_dir = data_path / "location"
+    
+    if not locations_dir.exists():
+        raise FileNotFoundError(f"Locations directory not found: {locations_dir}")
+    
+    # Location files may be .csv or .csv.gz
+    all_files = sorted(
+        glob.glob(str(locations_dir / "StormEvents_locations-ftp_*.csv*"))
+    )
+    
+    if years is not None:
+        filtered_files = []
+        for f in all_files:
+            for year in years:
+                if f"_d{year}_" in f:
+                    filtered_files.append(f)
+                    break
+        all_files = filtered_files
+    
+    dfs = []
+    for filepath in all_files:
+        try:
+            if filepath.endswith('.gz'):
+                df = pd.read_csv(filepath, compression='gzip', low_memory=False)
+            else:
+                df = pd.read_csv(filepath, low_memory=False)
+            if not df.empty:
+                dfs.append(df)
+        except Exception as e:
+            print(f"Error loading {filepath}: {e}")
+    
+    if not dfs:
+        return pd.DataFrame()
+    
+    return pd.concat(dfs, ignore_index=True)
+
+
+def load_all_storm_data(
+    data_dir: Union[str, Path],
+    years: Optional[List[int]] = None,
+    parse_dates: bool = False
+) -> tuple:
+    """
+    Load all 3 NOAA Storm Events DataFrames from local disk.
+    
+    Args:
+        data_dir: Directory containing details/, fatalities/, location/ subdirectories
+        years: List of years to load. If None, loads all.
+        parse_dates: Whether to parse datetime columns in details
+        
+    Returns:
+        Tuple of (details_df, fatalities_df, locations_df)
+    """
+    print("Loading details...")
+    details_df = load_storm_events(data_dir, years=years, parse_dates=parse_dates)
+    
+    print("\nLoading fatalities...")
+    fatalities_df = load_fatalities(data_dir, years=years)
+    print(f"  Loaded {len(fatalities_df):,} fatality records")
+    
+    print("\nLoading locations...")
+    locations_df = load_locations(data_dir, years=years)
+    print(f"  Loaded {len(locations_df):,} location records")
+    
+    print(f"\n{'='*40}")
+    print(f"Details:     {details_df.shape[0]:>10,} rows x {details_df.shape[1]} cols")
+    print(f"Fatalities:  {fatalities_df.shape[0]:>10,} rows x {fatalities_df.shape[1]} cols")
+    print(f"Locations:   {locations_df.shape[0]:>10,} rows x {locations_df.shape[1]} cols")
+    
+    return details_df, fatalities_df, locations_df
+
+
 def get_event_type_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Get summary statistics by event type."""
     return df.groupby('EVENT_TYPE').agg({

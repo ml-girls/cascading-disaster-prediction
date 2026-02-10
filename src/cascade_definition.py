@@ -583,6 +583,20 @@ def get_exploratory_config() -> CascadeConfig:
         use_domain_patterns=False,
     )
 
+def get_non_episode_config() -> CascadeConfig:
+    """
+    Get non-episode config with domain pattern filtering.
+    
+    Use for EDA to discover potential new cascade patterns.
+    """
+    return CascadeConfig(
+        temporal_window_days=7,
+        spatial_proximity=SpatialProximity.SAME_COUNTY,
+        require_same_episode=False,
+        require_different_event_types=True,
+        use_domain_patterns=True,
+    )
+
 
 def print_cascade_patterns():
     """Print all documented cascade patterns for reference."""

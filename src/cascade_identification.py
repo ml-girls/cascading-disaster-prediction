@@ -15,6 +15,7 @@ from .cascade_definition import (
     CascadeConfig, 
     SpatialProximity,
     is_valid_cascade,
+    get_valid_cascade_pairs,
     get_conservative_config
 )
 
@@ -83,6 +84,114 @@ def check_spatial_proximity(
     return False, None
 
 
+def _get_spatial_group_key(config: CascadeConfig) -> list:
+    """Get the columns to group by based on spatial proximity config."""
+    if config.spatial_proximity == SpatialProximity.SAME_COUNTY:
+        return ['STATE_FIPS', 'CZ_FIPS']
+    elif config.spatial_proximity == SpatialProximity.SAME_STATE:
+        return ['STATE_FIPS']
+    else:
+        # For distance-based, group by county as a reasonable approximation
+        return ['STATE_FIPS', 'CZ_FIPS']
+
+
+def _identify_cascades_in_group(
+    group_df: pd.DataFrame,
+    temporal_window: timedelta,
+    config: CascadeConfig,
+    valid_pairs: set,
+) -> List[CascadePair]:
+    """
+    Identify cascades within a single spatial/episode group using sorted scan.
+    
+    Uses numpy arrays for fast column access and breaks early when the
+    temporal window is exceeded.
+    """
+    if len(group_df) < 2:
+        return []
+
+    group_df = group_df.sort_values('BEGIN_DATETIME')
+
+    # Extract columns into arrays for fast indexed access
+    begin_dt = group_df['BEGIN_DATETIME'].values  # numpy datetime64
+    end_dt = group_df['END_DATETIME'].values
+    event_types = group_df['EVENT_TYPE'].values
+    event_ids = group_df['EVENT_ID'].values
+    state_fips = group_df['STATE_FIPS'].values
+    cz_fips = group_df['CZ_FIPS'].values
+    episode_ids = group_df['EPISODE_ID'].values
+
+    has_coords = 'BEGIN_LAT' in group_df.columns
+    if has_coords:
+        begin_lats = group_df['BEGIN_LAT'].values
+        begin_lons = group_df['BEGIN_LON'].values
+
+    tw_ns = np.timedelta64(int(temporal_window.total_seconds() * 1e9), 'ns')
+    zero_td = np.timedelta64(0, 'ns')
+
+    cascades = []
+    n = len(group_df)
+
+    for i in range(n):
+        end_i = end_dt[i]
+        etype_i = event_types[i]
+
+        for j in range(i + 1, n):
+            time_gap = begin_dt[j] - end_i
+
+            # Since sorted by begin_datetime, once begin[j] is too far
+            # past end[i], all subsequent j will also be too far
+            if time_gap > tw_ns:
+                break
+
+            if time_gap < zero_td:
+                continue
+
+            etype_j = event_types[j]
+
+            # Check different event types
+            if config.require_different_event_types and etype_i == etype_j:
+                continue
+
+            # Check domain patterns via pre-built set (O(1))
+            if config.use_domain_patterns:
+                if (etype_i, etype_j) not in valid_pairs:
+                    continue
+
+            # Spatial proximity (for distance-based mode within a county group)
+            if config.spatial_proximity == SpatialProximity.DISTANCE_KM:
+                if has_coords and not (np.isnan(begin_lats[i]) or np.isnan(begin_lats[j])):
+                    dist = haversine_distance(
+                        begin_lats[i], begin_lons[i],
+                        begin_lats[j], begin_lons[j]
+                    )
+                    if dist > config.distance_threshold_km:
+                        continue
+                    distance = dist
+                else:
+                    # Fall back to same county check
+                    if state_fips[i] != state_fips[j] or cz_fips[i] != cz_fips[j]:
+                        continue
+                    distance = None
+            else:
+                distance = None
+
+            gap_hours = time_gap / np.timedelta64(1, 'h')
+
+            cascades.append(CascadePair(
+                primary_event_id=int(event_ids[i]),
+                secondary_event_id=int(event_ids[j]),
+                primary_event_type=etype_i,
+                secondary_event_type=etype_j,
+                time_gap_hours=float(gap_hours),
+                same_county=(state_fips[i] == state_fips[j] and cz_fips[i] == cz_fips[j]),
+                same_episode=(episode_ids[i] == episode_ids[j]),
+                distance_km=distance
+            ))
+
+    return cascades
+
+
 def identify_cascades(
     df: pd.DataFrame,
     config: Optional[CascadeConfig] = None,
@@ -104,6 +213,8 @@ def identify_cascades(
     
     if verbose:
         print(f"Config: temporal={config.temporal_window_days}d, "
+              f"spatial={config.spatial_proximity.value}, "
+              f"same_episode={config.require_same_episode}, "
               f"use_domain_patterns={config.use_domain_patterns}")
     
     # Validate required columns
@@ -116,67 +227,43 @@ def identify_cascades(
     if verbose:
         print(f"Processing {len(df_valid):,} events...")
     
-    cascades = []
     temporal_window = timedelta(days=config.temporal_window_days)
-    
-    # Group by episode if required
-    if config.require_same_episode:
-        groups = df_valid.groupby('EPISODE_ID')
+
+    # Pre-build valid pairs set for O(1) lookup
+    if config.use_domain_patterns:
+        valid_pairs = get_valid_cascade_pairs()
+        if verbose:
+            print(f"Using {len(valid_pairs)} domain-validated cascade patterns")
     else:
-        groups = [('all', df_valid)]
-    
+        valid_pairs = set()
+
+    # Determine grouping strategy
+    if config.require_same_episode:
+        # Original behavior: group by episode
+        groups = df_valid.groupby('EPISODE_ID')
+        group_label = "episodes"
+    else:
+        # Optimized: group by spatial unit to avoid O(n²) over all events
+        group_keys = _get_spatial_group_key(config)
+        groups = df_valid.groupby(group_keys)
+        group_label = "spatial groups"
+
+    n_groups = len(groups)
+    if verbose:
+        print(f"Split into {n_groups:,} {group_label}")
+
+    cascades = []
     processed = 0
-    for episode_id, episode_events in groups:
-        if len(episode_events) < 2:
-            continue
-        
-        # Sort by begin time
-        episode_events = episode_events.sort_values('BEGIN_DATETIME')
-        events_list = list(episode_events.iterrows())
-        
-        for i, (idx1, event1) in enumerate(events_list):
-            for j, (idx2, event2) in enumerate(events_list[i+1:], start=i+1):
-                # Calculate time gap
-                time_gap = event2['BEGIN_DATETIME'] - event1['END_DATETIME']
-                
-                # Skip if outside temporal window
-                if time_gap < timedelta(0) or time_gap > temporal_window:
-                    continue
-                
-                # Check if different event types
-                if config.require_different_event_types:
-                    if event1['EVENT_TYPE'] == event2['EVENT_TYPE']:
-                        continue
-                
-                # Check domain patterns (causal filtering)
-                if config.use_domain_patterns:
-                    if not is_valid_cascade(event1['EVENT_TYPE'], event2['EVENT_TYPE']):
-                        continue
-                
-                # Check spatial proximity
-                is_proximate, distance = check_spatial_proximity(event1, event2, config)
-                if not is_proximate:
-                    continue
-                
-                # Create cascade pair
-                cascade = CascadePair(
-                    primary_event_id=event1['EVENT_ID'],
-                    secondary_event_id=event2['EVENT_ID'],
-                    primary_event_type=event1['EVENT_TYPE'],
-                    secondary_event_type=event2['EVENT_TYPE'],
-                    time_gap_hours=time_gap.total_seconds() / 3600,
-                    same_county=(
-                        event1['STATE_FIPS'] == event2['STATE_FIPS'] and
-                        event1['CZ_FIPS'] == event2['CZ_FIPS']
-                    ),
-                    same_episode=(event1['EPISODE_ID'] == event2['EPISODE_ID']),
-                    distance_km=distance
-                )
-                cascades.append(cascade)
+    for group_id, group_events in groups:
+        group_cascades = _identify_cascades_in_group(
+            group_events, temporal_window, config, valid_pairs
+        )
+        cascades.extend(group_cascades)
         
         processed += 1
-        if verbose and processed % 1000 == 0:
-            print(f"  Processed {processed:,} episodes, found {len(cascades):,} cascades...")
+        if verbose and processed % 500 == 0:
+            print(f"  Processed {processed:,}/{n_groups:,} {group_label}, "
+                  f"found {len(cascades):,} cascades so far...")
     
     if verbose:
         print(f"Found {len(cascades):,} cascade pairs")

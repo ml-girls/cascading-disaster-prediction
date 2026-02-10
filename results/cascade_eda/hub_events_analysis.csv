@@ -1,21 +1,21 @@
 EVENT_TYPE,Cascade Count,Unique Secondary Types
-Thunderstorm Wind,73680,18
-Hail,32890,7
-Drought,19015,1
-High Wind,16951,4
-Flash Flood,15088,4
-Winter Weather,14477,1
-Winter Storm,11039,5
-Marine Thunderstorm Wind,10793,4
-Flood,9542,2
-Heavy Snow,8886,4
-Excessive Heat,8271,3
-Heat,7709,3
-Tornado,5704,4
-Heavy Rain,4734,8
-Strong Wind,4223,2
-Extreme Cold/Wind Chill,3456,1
-Dense Fog,2634,1
-Frost/Freeze,2415,1
-Blizzard,2055,3
-Cold/Wind Chill,1988,2
+Thunderstorm Wind,67711,32
+Hail,54627,7
+Flash Flood,7902,3
+Tornado,6438,6
+Heat,5557,7
+Excessive Heat,4907,6
+Heavy Rain,4148,7
+Winter Storm,2849,25
+Funnel Cloud,1930,7
+Marine Thunderstorm Wind,1695,3
+Drought,1660,11
+Blizzard,1261,8
+Heavy Snow,966,13
+Lightning,813,2
+Waterspout,702,1
+Flood,671,2
+Cold/Wind Chill,640,2
+Debris Flow,563,3
+High Wind,549,4
+Ice Storm,499,6
