@@ -4,96 +4,78 @@ from pathlib import Path
 import pickle
 from typing import Tuple, Optional
 import argparse
+import ast
+from datetime import datetime
 from features import engineer_base_features, get_feature_columns
 from aggregate_features import AggregateFeatureTransformer
 
-DATA_DIR = Path(__file__).parent.parent.parent / "labeled_data"
+# Path to the primary labeled dataset
+FULL_DATA_PATH = Path("/Users/varshel/Documents/10718/Project/cascading-disaster-prediction/data/processed/events_labeled_full.csv")
 RANDOM_STATE = 42
 TEST_SIZE = 0.2
 
+CASCADE_TYPES = [
+    'Avalanche', 'Blizzard', 'Coastal Flood', 'Cold/Wind Chill', 'Debris Flow',
+    'Dense Fog', 'Dust Storm', 'Excessive Heat', 'Extreme Cold/Wind Chill',
+    'Flash Flood', 'Flood', 'Frost/Freeze', 'Hail', 'Heat', 'Heavy Rain',
+    'Heavy Snow', 'High Surf', 'High Wind', 'Ice Storm', 'Lightning',
+    'Marine Hail', 'Marine Thunderstorm Wind', 'Rip Current', 'Storm Surge/Tide',
+    'Thunderstorm Wind', 'Tornado', 'Waterspout', 'Wildfire', 'Winter Weather'
+]
+
 def load_data(year_range=(2010, 2025), filter_cascades=True):
-    """Load and filter to cascade-related events only."""
+    """Load unified dataset and expand label targets."""
 
-    events_path = DATA_DIR / "events_labeled.csv"
-    labels_path = DATA_DIR / "labels_binary.csv"
+    events_path = FULL_DATA_PATH
 
-    events_df = pd.read_csv(events_path, low_memory=False)
-    labels_binary = pd.read_csv(labels_path)
+    print(f"Loading data from: {events_path}")
+    df = pd.read_csv(events_path, low_memory=False)
     
-    if 'EVENT_ID' in labels_binary.columns:
-        label_cols = [c for c in labels_binary.columns if c != 'EVENT_ID']
-        
-        combined = events_df.merge(
-            labels_binary,
-            on='EVENT_ID',
-            how='inner',
-            validate='one_to_one'  # Ensures 1:1 relationship
-        )
-        
-        # Split back into events and labels
-        labels_binary = combined[label_cols]
-        events_df = combined.drop(columns=label_cols)
+    # Pre-process columns
+    if 'is_cascade_result' in df.columns:
+        df['is_cascade_result'] = df['is_cascade_result'].astype(str).str.lower().map({
+            'true': 1, 'false': 0, '1': 1, '0': 0
+        }).fillna(0).astype(int)    
+    
+    # Expand labels from 'target' column
+    def parse_target(t):
+        if pd.isna(t) or t == '[]': return []
+        try:
+            if isinstance(t, str) and t.startswith('['):
+                return ast.literal_eval(t)
+            return []
+        except: return []
+
+    print("Expanding labels...")
+    target_series = df['target'].apply(parse_target)
+    labels_binary = pd.DataFrame(0, index=df.index, columns=CASCADE_TYPES)
+    df['triggered_any_cascade'] = (labels_binary.sum(axis=1) > 0).astype(int)
+    events_df = df.copy()
+    
+    for label in CASCADE_TYPES:
+        labels_binary[label] = target_series.apply(lambda x: 1 if label in x else 0)
     
     # Parse dates
     for col in ['BEGIN_DATETIME', 'END_DATETIME']:
         if col in events_df.columns:
             events_df[col] = pd.to_datetime(events_df[col], errors='coerce')
     
+    # Filter by year
     year_mask = (events_df['BEGIN_DATETIME'].dt.year >= year_range[0]) & \
                 (events_df['BEGIN_DATETIME'].dt.year <= year_range[1])
     
     events_df = events_df[year_mask].reset_index(drop=True)
     labels_binary = labels_binary[year_mask].reset_index(drop=True)
     
-    print(f"After year filter ({year_range[0]}-{year_range[1]}): {len(events_df):,} events")
-    has_any_cascade = labels_binary.sum(axis=1) > 0
-    
-    print(f"\nCascade filtering:")
-    print(f"  Events with cascades: {has_any_cascade.sum():,}")
-    print(f"  Events without cascades: {(~has_any_cascade).sum():,}")
+    print(f"Total events in range: {len(events_df):,}")
     
     if filter_cascades:
-        print("Filtering events without cascades...")
+        has_any_cascade = labels_binary.sum(axis=1) > 0
+        print(f"Filtering to {has_any_cascade.sum():,} ({has_any_cascade.sum()/len(events_df)*100:.1f}%) cascade events...")
         events_df = events_df[has_any_cascade].reset_index(drop=True)
         labels_binary = labels_binary[has_any_cascade].reset_index(drop=True)
     
-    n_events = len(events_df)
-    n_positive_labels = labels_binary.values.sum()
-    n_total_labels = labels_binary.size
-    
-    # Per-event statistics
-    labels_per_event = labels_binary.sum(axis=1)
-    avg_labels_per_event = labels_per_event.mean()
-    max_labels_per_event = labels_per_event.max()
-    
-    # Per-label statistics
-    events_per_label = labels_binary.sum(axis=0)
-    avg_events_per_label = events_per_label.mean()
-    
-    print(f"  Total events: {n_events:,}")
-    print(f"  Total positive labels: {n_positive_labels:,}")
-    print(f"  Label sparsity: {n_positive_labels/n_total_labels*100:.2f}%")
-    
-    print(f"  Avg cascades per event: {avg_labels_per_event:.2f}")
-    print(f"  Max cascades per event: {max_labels_per_event}")
-    print(f"  Avg events per cascade type: {avg_events_per_label:.1f}")
-    
-    cascade_dist = labels_per_event.value_counts().sort_index()
-    for n_cascades, count in cascade_dist.items():
-        pct = count / n_events * 100
-        print(f"  {n_cascades} cascades: {count:,} events ({pct:.1f}%)")
-
-    cascade_pairs_path = DATA_DIR / "cascade_pairs.csv"
-    
-    cascade_pairs = None
-    if cascade_pairs_path.exists():
-        cascade_pairs = pd.read_csv(cascade_pairs_path)
-        if 'primary_begin_time' in cascade_pairs.columns:
-            cascade_pairs['primary_begin_time'] = pd.to_datetime(
-                cascade_pairs['primary_begin_time'], errors='coerce'
-            )
-    
-    return events_df, cascade_pairs, labels_binary
+    return events_df, labels_binary
 
 def split_data(events_df, labels_binary, split_type='chronological', test_size=0.2):
     if split_type == 'chronological':
@@ -102,93 +84,91 @@ def split_data(events_df, labels_binary, split_type='chronological', test_size=0
         labels_binary = labels_binary.iloc[sort_idx].reset_index(drop=True)
         split_idx = int(len(events_df) * (1 - test_size))
         return events_df.iloc[:split_idx], events_df.iloc[split_idx:], labels_binary.iloc[:split_idx], labels_binary.iloc[split_idx:]
-    elif split_type == 'random':
+    if split_type == 'random':
         from sklearn.model_selection import train_test_split
         any_cascade = (labels_binary.values.sum(axis=1) > 0).astype(int)
         train_idx, test_idx = train_test_split(np.arange(len(events_df)), test_size=test_size, random_state=RANDOM_STATE, stratify=any_cascade)
         return events_df.iloc[train_idx], events_df.iloc[test_idx], labels_binary.iloc[train_idx], labels_binary.iloc[test_idx]
-    raise ValueError(f"Unknown split_type: {split_type}")
 
-def engineer_features(train_events, test_events, cascade_pairs, split_type, include_historical=True):
+def engineer_features(train_events, test_events, train_labels, split_type, include_historical=True):
+    # Disable historical features for random split to prevent leakage
     if split_type == 'random':
         include_historical = False
     
+    # Base features
     train_featured = engineer_base_features(train_events, include_historical=include_historical)
     test_featured = engineer_base_features(test_events, include_historical=include_historical)
     
-    if split_type == 'chronological' and cascade_pairs is not None:
+    # Aggregate features (Location stats + Transition probabilities)
+    # Only meaningful for chronological split where we fit on past and transform present
+    if split_type == 'chronological':
         agg_transformer = AggregateFeatureTransformer()
-        train_featured = agg_transformer.fit_transform(train_featured, cascade_pairs)
+        train_featured = agg_transformer.fit_transform(train_featured, train_labels)
         test_featured = agg_transformer.transform(test_featured)
         
     feature_cols = get_feature_columns(train_featured)
     return train_featured, test_featured, feature_cols
 
-def prepare_data(include_historical=True, split_type='chronological', output_dir=None, filter_cascades=True):
-    events_df, cascade_pairs, labels_binary = load_data(year_range=(2010, 2025), filter_cascades=filter_cascades)
+def prepare_data(include_historical=True, split_type='chronological', filter_cascades=True):
+    suffix = "_filtered" if filter_cascades else ""
+    output_dir = Path(__file__).parent.parent / f"{split_type}{suffix}_prepared_data"
 
+    events_df, labels_binary = load_data(year_range=(2010, 2025), filter_cascades=filter_cascades)
     train_events, test_events, train_labels, test_labels = split_data(events_df, labels_binary, split_type=split_type, test_size=TEST_SIZE)
     
-    cascade_pairs_train = None
-    if cascade_pairs is not None and split_type == 'chronological':
-        cutoff_time = train_events['BEGIN_DATETIME'].max()
-        cascade_pairs_train = cascade_pairs[cascade_pairs['primary_begin_time'] <= cutoff_time].copy() if 'primary_begin_time' in cascade_pairs.columns else \
-                             cascade_pairs[cascade_pairs['primary_event_id'].isin(set(train_events['EVENT_ID']))].copy()
-    
-    train_featured, test_featured, feature_cols = engineer_features(train_events, test_events, cascade_pairs_train, split_type, include_historical)
+    train_featured, test_featured, feature_cols = engineer_features(
+        train_events, test_events, train_labels, split_type, include_historical
+    )
     
     X_train, X_test = train_featured[feature_cols].fillna(0), test_featured[feature_cols].fillna(0)
     y_train, y_test = train_labels.values, test_labels.values
     target_names = train_labels.columns.tolist()
 
-    zero_var_mask = (X_train == 0).all(axis=0)
-    n_zero_var = zero_var_mask.sum()
-    
-    if n_zero_var > 0:
-        print(f"  Found {n_zero_var} zero-variance features")
+    # Remove zero-variance features
+    zero_var_mask = (X_train == 0).all(axis=0) | (X_train.std(axis=0) == 0)
+    if zero_var_mask.any():
+        print(f"  Removing {zero_var_mask.sum()} zero-variance features...")
         feature_cols = [f for f, keep in zip(feature_cols, ~zero_var_mask) if keep]
         X_train = X_train[feature_cols]
         X_test = X_test[feature_cols]
-        print(f"  Kept {len(feature_cols)} features")
     
-    # Remove labels with < 10 positive samples
-    print("\nFiltering labels with insufficient samples...")
+    # Remove labels with < 10 positive samples in train
+    print("\nFiltering labels with insufficient samples (< 10)...")
     label_counts = y_train.sum(axis=0)
     label_mask = label_counts >= 10
-    n_removed = (~label_mask).sum()
-    
-    if n_removed > 0:
-        print(f"  Removing {n_removed} labels with < 10 samples")
+    if (~label_mask).any():
+        print(f"  Removing {(~label_mask).sum()} labels. Kept {label_mask.sum()} labels.")
         y_train = y_train[:, label_mask]
         y_test = y_test[:, label_mask]
         target_names = [t for t, keep in zip(target_names, label_mask) if keep]
-        print(f"  Kept {len(target_names)} labels")
     
     output_dir.mkdir(parents=True, exist_ok=True)
-    np.save(output_dir / "X_train.npy", X_train.values); np.save(output_dir / "X_test.npy", X_test.values)
-    np.save(output_dir / "y_train.npy", y_train); np.save(output_dir / "y_test.npy", y_test)
+    np.save(output_dir / "X_train.npy", X_train.values)
+    np.save(output_dir / "X_test.npy", X_test.values)
+    np.save(output_dir / "y_train.npy", y_train)
+    np.save(output_dir / "y_test.npy", y_test)
     
+    metadata = {
+        'feature_names': feature_cols,
+        'target_names': target_names,
+        'split_type': split_type,
+        'filtered': filter_cascades,
+        'timestamp': datetime.now().isoformat()
+    }
     with open(output_dir / "metadata.pkl", "wb") as f:
-        pickle.dump({'feature_names': feature_cols, 'target_names': target_names, 'split_type': split_type}, f)
+        pickle.dump(metadata, f)
         
+    print(f"\n✓ Preparation complete. Saved to {output_dir}")
+    print(f"  Features: {len(feature_cols)}, Labels: {len(target_names)}")
     return X_train, X_test, y_train, y_test, feature_cols, target_names
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Prepare data for cascade detection')
     parser.add_argument('--split_type', type=str, default='chronological', choices=['random', 'chronological'], help='Split type')
-    parser.add_argument('--filter_cascades', type=bool, help='Filter cascades')
+    parser.add_argument('--filter_cascades', type=str, default='False', help='Filter to cascades only (True/False)')
     args = parser.parse_args()
 
-    if args.filter_cascades:
-        output_dir = OUTPUT_DIR = Path(__file__).parent.parent / f"{args.split_type}_filtered_data"
-    else:
-        output_dir = OUTPUT_DIR = Path(__file__).parent.parent / f"{args.split_type}_data"
-
-    print(f"Output directory: {output_dir}")
+    filter_val = args.filter_cascades.lower() == 'true'
+    include_hist = (args.split_type == 'chronological')
     
-    if args.split_type == 'random':
-        prepare_data(include_historical=False, split_type=args.split_type, output_dir=output_dir, filter_cascades=args.filter_cascades)
-    elif args.split_type == 'chronological':
-        prepare_data(include_historical=True, split_type=args.split_type, output_dir=output_dir, filter_cascades=args.filter_cascades)
-    else:
-        raise ValueError(f"Unknown split_type: {args.split_type}")
+    prepare_data(include_historical=include_hist, split_type=args.split_type, filter_cascades=filter_val)
