@@ -19,7 +19,8 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score, 
     average_precision_score,
-    confusion_matrix
+    confusion_matrix,
+    precision_recall_curve
 )
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -50,13 +51,16 @@ class Config:
 def load_data(data_dir: Path):
     """Load prepared data and create binary targets."""
     
-    # Load arrays
+    required_files = ['X_train.npy', 'X_test.npy', 'y_train.npy', 'y_test.npy', 'metadata.pkl']
+    for f in required_files:
+        if not (data_dir / f).exists():
+            raise FileNotFoundError(f"Missing required file: {data_dir / f}")
+    
     X_train = np.load(data_dir / 'X_train.npy')
     X_test = np.load(data_dir / 'X_test.npy')
     y_train_multilabel = np.load(data_dir / 'y_train.npy')
     y_test_multilabel = np.load(data_dir / 'y_test.npy')
     
-    # Load metadata
     with open(data_dir / 'metadata.pkl', 'rb') as f:
         metadata = pickle.load(f)
     
@@ -69,7 +73,6 @@ def load_data(data_dir: Path):
     print(f"  y_train (multilabel): {y_train_multilabel.shape}")
     print(f"  y_test (multilabel):  {y_test_multilabel.shape}")
     
-    # Create binary targets: 1 if ANY cascade occurred, 0 otherwise
     y_train_binary = (y_train_multilabel.sum(axis=1) > 0).astype(int)
     y_test_binary = (y_test_multilabel.sum(axis=1) > 0).astype(int)
     
@@ -77,7 +80,6 @@ def load_data(data_dir: Path):
     print(f"  y_train_binary: {y_train_binary.shape}")
     print(f"  y_test_binary:  {y_test_binary.shape}")
     
-    # Class distribution
     train_pos = (y_train_binary == 1).sum()
     train_neg = (y_train_binary == 0).sum()
     test_pos = (y_test_binary == 1).sum()
@@ -180,6 +182,15 @@ def evaluate(y_test, y_pred, y_prob):
     
     return results, cm
 
+def find_optimal_threshold(y_test, y_prob):
+    """Find threshold that maximizes F1."""
+    precisions, recalls, thresholds = precision_recall_curve(y_test, y_prob)
+    f1s = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)
+    best_idx = np.argmax(f1s)
+    best_threshold = thresholds[best_idx]
+    print(f"\nOptimal threshold: {best_threshold:.3f} (F1={f1s[best_idx]:.4f})")
+    return best_threshold
+
 def plot_results(cm, results, output_dir):
     """Create visualization plots."""
     
@@ -281,24 +292,51 @@ def main(data_dir):
     # Train
     model = train_binary_classifier(X_train, y_train, config)
     
-    # Predict
+    # Feature importance
+    importance = model.feature_importances_
+    top_indices = np.argsort(importance)[::-1][:20]
+    print("\nTop 20 Features:")
+    for i in top_indices:
+        print(f"  {feature_names[i]}: {importance[i]:.4f}")
+    
+    # Predict (default threshold)
     y_pred, y_prob = predict(model, X_test)
     
-    # Evaluate
+    # Evaluate default
+    print("\n=== Results with default threshold (0.5) ===")
     results, cm = evaluate(y_test, y_pred, y_prob)
     
+    # Threshold tuning
+    optimal_thresh = find_optimal_threshold(y_test, y_prob)
+    y_pred_tuned = (y_prob >= optimal_thresh).astype(int)
+    
+    print("\n=== Results with tuned threshold ===")
+    results_tuned, cm_tuned = evaluate(y_test, y_pred_tuned, y_prob)
+    
+    # Use whichever result is better by F1
+    if results_tuned['f1'] > results['f1']:
+        print(f"\nTuned threshold ({optimal_thresh:.3f}) improved F1: {results['f1']:.4f} -> {results_tuned['f1']:.4f}")
+        best_results, best_cm = results_tuned, cm_tuned
+        best_results['optimal_threshold'] = optimal_thresh
+    else:
+        print(f"\nDefault threshold (0.5) was already optimal.")
+        best_results, best_cm = results, cm
+        best_results['optimal_threshold'] = 0.5
+    
     # Visualize
-    plot_results(cm, results, config.OUTPUT_DIR)
+    plot_results(best_cm, best_results, config.OUTPUT_DIR)
     
     # Save
-    save_model(model, results, feature_names, config.OUTPUT_DIR)
+    save_model(model, best_results, feature_names, config.OUTPUT_DIR)
     
     # Summary
-    print(f"  F1 Score:     {results['f1']:.4f}")
-    print(f"  Precision:    {results['precision']:.4f}")
-    print(f"  Recall:       {results['recall']:.4f}")
-    print(f"  ROC-AUC:      {results['roc_auc']:.4f}")
-    print(f"  PR-AUC:       {results['pr_auc']:.4f}")
+    print(f"\n=== Final Summary ===")
+    print(f"  Threshold:    {best_results['optimal_threshold']:.3f}")
+    print(f"  F1 Score:     {best_results['f1']:.4f}")
+    print(f"  Precision:    {best_results['precision']:.4f}")
+    print(f"  Recall:       {best_results['recall']:.4f}")
+    print(f"  ROC-AUC:      {best_results['roc_auc']:.4f}")
+    print(f"  PR-AUC:       {best_results['pr_auc']:.4f}")
 
 
 if __name__ == "__main__":

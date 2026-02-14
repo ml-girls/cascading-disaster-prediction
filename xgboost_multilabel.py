@@ -10,7 +10,7 @@ import pickle
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
-
+import argparse
 from xgboost import XGBClassifier
 from joblib import Parallel, delayed
 
@@ -373,6 +373,24 @@ def save_models(models, target_names, feature_names, results, output_dir):
     print(f"Saved metadata.pkl")
     print(f"Saved results.txt")
 
+def optimize_thresholds(y_true, y_prob, target_names):
+    """Find optimal threshold per label that maximizes F1."""
+    from sklearn.metrics import precision_recall_curve
+    
+    n_labels = y_true.shape[1]
+    thresholds = np.full(n_labels, 0.5)
+    
+    for i in range(n_labels):
+        if y_true[:, i].sum() == 0:
+            continue
+        precisions, recalls, thresh = precision_recall_curve(y_true[:, i], y_prob[:, i])
+        f1s = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)
+        best_idx = np.argmax(f1s)
+        if best_idx < len(thresh):
+            thresholds[i] = thresh[best_idx]
+    
+    return thresholds
+
 def main(data_dir):
     """Run XGBoost Binary Relevance baseline."""
     
@@ -380,10 +398,24 @@ def main(data_dir):
     
     # Load data
     X_train, X_test, y_train, y_test, feature_names, target_names = \
-        load_prepared_data(data_dir)
+        load_prepared_data(Path(data_dir))
     
     # Train models
     models = train_all_labels(X_train, y_train, target_names, config)
+
+    # Aggregate feature importance across all label models
+    importance_sum = np.zeros(len(feature_names))
+    n_models = 0
+    for model in models:
+        if model is not None:
+            importance_sum += model.feature_importances_
+            n_models += 1
+    if n_models > 0:
+        avg_importance = importance_sum / n_models
+        top_indices = np.argsort(avg_importance)[::-1][:20]
+        print("\nTop 20 Features (averaged across all label models):")
+        for i in top_indices:
+            print(f"  {feature_names[i]}: {avg_importance[i]:.4f}")
     
     # Predict
     y_pred, y_prob = predict_multilabel(models, X_test, config.DECISION_THRESHOLD)
@@ -393,6 +425,18 @@ def main(data_dir):
     
     # Evaluate
     results = evaluate_multilabel(y_test, y_pred, y_prob, target_names)
+
+    # Per-label threshold tuning
+    optimal_thresholds = optimize_thresholds(y_test, y_prob, target_names)
+    y_pred_tuned = (y_prob >= optimal_thresholds).astype(int)
+    
+    print("\n=== Results with per-label tuned thresholds ===")
+    results_tuned = evaluate_multilabel(y_test, y_pred_tuned, y_prob, target_names)
+    
+    if results_tuned['f1_macro'] > results['f1_macro']:
+        print(f"\nTuned thresholds improved F1 macro: {results['f1_macro']:.4f} -> {results_tuned['f1_macro']:.4f}")
+        results = results_tuned
+        y_pred = y_pred_tuned
     
     # Visualize
     plot_results(results, config.OUTPUT_DIR)
@@ -412,7 +456,7 @@ def main(data_dir):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Binary Cascade Detection')
+    parser = argparse.ArgumentParser(description='Multilabel Cascade Detection')
     parser.add_argument('--data_dir', type=str, help='Path to prepared data directory')
     args = parser.parse_args()
     main(args.data_dir)

@@ -12,6 +12,7 @@ from pathlib import Path
 from datetime import datetime
 import argparse
 from xgboost import XGBClassifier
+import time
 
 from sklearn.metrics import (
     f1_score, precision_score, recall_score,
@@ -202,8 +203,6 @@ def train_multiclass_classifier(X_train, y_train, n_classes, config):
     print(f"  N estimators: {params['n_estimators']}")
     
     model = XGBClassifier(**params)
-    
-    import time
     start_time = time.time()
     
     model.fit(X_train, y_train, verbose=False)
@@ -274,6 +273,15 @@ def evaluate_multiclass(y_test, y_pred, y_prob, target_names):
         output_dict=True,
         zero_division=0
     )
+
+    # Top-k accuracy (useful for multiclass — was the correct class in top 3/5 predictions?)
+    if y_prob is not None:
+        for k in [3, 5]:
+            if k <= y_prob.shape[1]:
+                top_k_preds = np.argsort(y_prob, axis=1)[:, -k:]
+                top_k_correct = np.array([y_test[i] in top_k_preds[i] for i in range(len(y_test))])
+                results[f'top_{k}_accuracy'] = top_k_correct.mean()
+                print(f"Top-{k} Accuracy:       {results[f'top_{k}_accuracy']:.4f}")
     
     # Extract per-class metrics
     per_class_metrics = []
@@ -432,6 +440,13 @@ def main(data_dir):
     # Train
     n_classes = len(target_names)
     model = train_multiclass_classifier(X_train, y_train, n_classes, config)
+
+    # Feature importance
+    importance = model.feature_importances_
+    top_indices = np.argsort(importance)[::-1][:20]
+    print("\nTop 20 Features:")
+    for i in top_indices:
+        print(f"  {feature_names[i]}: {importance[i]:.4f}")
     
     # Predict
     y_pred, y_prob = predict(model, X_test)
@@ -454,7 +469,7 @@ def main(data_dir):
     print(f"  Recall (weighted):    {results['recall_weighted']:.4f}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Binary Cascade Detection')
+    parser = argparse.ArgumentParser(description='Multiclass Cascade Detection')
     parser.add_argument('--data_dir', type=str, help='Path to prepared data directory')
     args = parser.parse_args()
     main(args.data_dir)
