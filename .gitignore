@@ -1,0 +1,8 @@
+data/
+models/
+.DS_Store
+
+# PyDrive2 OAuth2 credentials (each team member creates their own)
+credentials.json
+client_secrets.json
+token*.json
